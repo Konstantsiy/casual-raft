@@ -1,4 +1,4 @@
-package state_machine
+package casual_raft
 
 type cmdKind uint8
 

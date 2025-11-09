@@ -62,7 +62,7 @@ func (sm stateMachine) decodeCmd(msg []byte) (command, error) {
 	if keyLen <= 0 || keyLen > 1024 {
 		return cmd, fmt.Errorf("invalid key length: %d", keyLen)
 	}
-	// ensure message is long enough for the key
+	// ensure a message is long enough for the key
 	if len(msg) < 5+keyLen {
 		return cmd, fmt.Errorf("incomplete message for key: need %d, got %d", 5+keyLen, len(msg))
 	}
@@ -71,7 +71,7 @@ func (sm stateMachine) decodeCmd(msg []byte) (command, error) {
 
 	if cmd.kind == cmdSet {
 		var valueOffset = 5 + keyLen
-		// ensure message is long enough for value length
+		// ensure a message is long enough for value length
 		if len(msg) < valueOffset+4 {
 			return cmd, fmt.Errorf("message too short for value length")
 		}
@@ -81,7 +81,7 @@ func (sm stateMachine) decodeCmd(msg []byte) (command, error) {
 		if valueLen < 0 || valueLen > 1024*1024 {
 			return cmd, fmt.Errorf("invalid value length: %d", valueLen)
 		}
-		// ensure message is long enough for the value
+		// ensure the message is long enough for the value
 		if len(msg) < valueOffset+4+valueLen {
 			return cmd, fmt.Errorf("incomplete message for value: need %d, got %d", valueOffset+4+valueLen, len(msg))
 		}

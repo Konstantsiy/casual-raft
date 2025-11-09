@@ -3,27 +3,49 @@ package casual_raft
 import (
 	"encoding/binary"
 	"fmt"
+	"math/rand"
 	"os"
 	"sync"
+	"time"
 )
 
-// persistentState is the state that must be persisted on all servers
-type persistentState struct {
-	// currentTerm is the latest term server has seen (initialized to 0 on first boot, increases monotonically)
-	currentTerm uint32
-	// log is the log entries (commands for state machine)
-	log []LogEntry
-	// votedFor is a candidateId that received vote in current term (or null if none)
-	votedFor uint32
-}
+type ServerState int
+
+const (
+	// ServerStateFollower - normal state, receives commands from leader
+	// If no heartbeats received, becomes candidate
+	ServerStateFollower = iota
+
+	// ServerStateCandidate - trying to become leader, requests votes from other servers
+	ServerStateCandidate
+
+	// ServerStateLeader - receives client requests and replicates to followers
+	// Only 1 leader at a time in the cluster
+	ServerStateLeader
+)
 
 type Server struct {
-	mx sync.Mutex
+	ID    uint32
+	peers []uint32 // all server ID's in cluster
 
-	persistentState persistentState
+	mx sync.RWMutex
 
-	// fd is a persistent file descriptor to store server state
-	fd *os.File
+	persistentState persistentState // state written to disk
+	fd              *os.File        // fd is a file descriptor to store persistence state
+	volatileState   volatileState   //  for each server
+	leaderState     leaderState     // only used when state == Leader
+
+	// current state
+	state ServerState
+
+	electionTimer   *time.Timer  // timer that triggers election if no heartbeat received
+	heartbeatTicker *time.Ticker // ticker that sends periodic heartbeats
+
+	sm     StateMachine
+	client *raftClient
+
+	// signal to spot all goroutines
+	shutdownCh chan struct{}
 }
 
 // persist writes the persistent state to disk
@@ -123,4 +145,155 @@ func (s *Server) restore() error {
 	}
 
 	return nil
+}
+
+func (s *Server) resetElectionTimer() {
+	// Random timeout: 150 ms - 300 ms
+	// If all the servers timeout at the sae time, they all become candidates, causing failed elections.
+	// Random timeout means one server usually becomes a candidate first.
+	var timeout = time.Duration(150*rand.Intn(150)) * time.Millisecond
+
+	if s.electionTimer != nil {
+		s.electionTimer.Stop()
+	}
+
+	s.electionTimer = time.NewTimer(timeout)
+}
+
+// run is the main cycle for each server, it waits for events and handle them
+func (s *Server) run() {
+	for {
+		select {
+		case <-s.shutdownCh:
+			return
+
+		// election timer fired - no heartbeat from leader
+		case <-s.electionTimer.C:
+			s.startElection()
+		}
+	}
+}
+
+func (s *Server) sendHeartbeats() {
+	for {
+		select {
+		case <-s.shutdownCh:
+			return
+
+		case <-s.heartbeatTicker.C:
+			// check if still leader
+			s.mx.RLock()
+			if s.state != ServerStateLeader {
+				s.mx.RUnlock()
+				return
+			}
+			s.mx.RUnlock()
+
+			// send AppendEntries to each peer
+			for _, peerID := range s.peers {
+				if peerID == s.ID {
+					continue
+				}
+
+				go s.replicateLog(peerID)
+			}
+		}
+	}
+}
+
+func (s *Server) replicateLog(peerID uint32) {
+
+}
+
+func (s *Server) startElection() {
+	s.mx.Lock()
+
+	// become a candidate
+	s.state = ServerStateCandidate
+
+	// increment term (new election round)
+	s.persistentState.currentTerm++
+	var currentTerm = s.persistentState.currentTerm
+
+	// voted for yourself
+	s.persistentState.votedFor = s.ID
+
+	_ = s.persist()
+
+	var lastLogIndex = uint32(0)
+	var lastLogTerm = uint32(0)
+
+	if len(s.persistentState.log) > 0 {
+		var lastEntry = s.persistentState.log[len(s.persistentState.log)-1]
+		lastLogIndex = lastEntry.Index
+		lastLogTerm = lastEntry.Term
+	}
+
+	s.mx.Unlock()
+
+	// reset time for the next election if this fails
+	s.resetElectionTimer()
+
+	// collect votes from all peers, start with 1 vote (yourself)
+	var votes = 1
+	var voteMx sync.Mutex
+
+	for _, peerID := range s.peers {
+		if peerID == s.ID {
+			continue
+		}
+
+		go func(peer uint32) {
+			var req = &RequestVoteRequest{
+				Term:         currentTerm,
+				CandidateID:  s.ID,
+				LastLogIndex: lastLogIndex,
+				LastLogTerm:  lastLogTerm,
+			}
+
+			// might fail in peer is down/slow
+			var resp, err = s.client.sendRequestVote(peer, req)
+			if err != nil {
+				// just ignore unreachable peer
+				// todo: add logging
+				return
+			}
+
+			// check if peer has higher term
+			s.mx.Lock()
+			if resp.Term > s.persistentState.currentTerm {
+				// we're behind, need to step down
+				s.persistentState.currentTerm = resp.Term
+				s.state = ServerStateFollower
+				s.persistentState.votedFor = 0
+
+				_ = s.persist()
+
+				s.resetElectionTimer()
+				s.mx.Unlock()
+
+				// we don't need to check the other peers anymore
+				return
+			}
+			s.mx.Unlock()
+
+			// count the vote if granted
+			if resp.VoteGranted {
+				voteMx.Lock()
+				votes++
+
+				// check if we ween taken the majority of votes
+				var majority = len(s.peers)/2 + 1
+				if votes >= majority {
+					s.becomeLeader()
+				}
+				voteMx.Unlock()
+			}
+
+		}(peerID)
+	}
+}
+
+func (s *Server) becomeLeader() {
+
 }

@@ -202,7 +202,98 @@ func (s *Server) sendHeartbeats() {
 }
 
 func (s *Server) replicateLog(peerID uint32) {
+	s.mx.RLock()
 
+	if s.state != ServerStateLeader {
+		s.mx.RUnlock()
+		return
+	}
+
+	// determine what to send to peer,
+	// nextIndex[peer] - where to start from
+	var nextIndex = s.leaderState.nextIndex[peerID]
+
+	// build the "consistency check" params
+	// prevLogIndex - log entry before new one
+	// prevLogTerm - term of that log entry
+	// Follower checks if it has matching entry and previous log index,
+	// If not, logs are inconsistent and follower rejects
+	var prevLogIndex = nextIndex - 1
+	var prevLogTerm = uint32(0)
+
+	if prevLogIndex > 0 {
+		for _, entry := range s.persistentState.log {
+			if entry.Index == prevLogIndex {
+				prevLogTerm = entry.Term
+				break
+			}
+		}
+	}
+
+	// collect every entry from nextIndex onwards to send
+	var entries []LogEntry
+	for _, entry := range s.persistentState.log {
+		if entry.Index >= nextIndex {
+			entries = append(entries, entry)
+		}
+	}
+
+	var req = &AppendEntriesRequest{
+		Term:         s.persistentState.currentTerm,
+		LeaderID:     s.ID,
+		PrevLogIndex: prevLogIndex,
+		PrevLogTerm:  prevLogTerm,
+		Entries:      entries,
+		LeaderCommit: s.volatileState.commitedIndex, // tell follower what's commited
+	}
+
+	s.mx.RUnlock()
+
+	var resp, err = s.client.sendAppendEntries(peerID, req)
+	if err != nil {
+		// todo: log
+		return
+	}
+
+	s.mx.Lock()
+	s.mx.Unlock()
+
+	// check if peer has higher term
+	if resp.Term != s.persistentState.currentTerm {
+		// we're behind, need to step down to the follower state
+		s.persistentState.currentTerm = resp.Term
+		s.state = ServerStateFollower
+		s.persistentState.votedFor = 0
+
+		_ = s.persist()
+		s.resetElectionTimer()
+
+		if s.heartbeatTicker != nil {
+			s.heartbeatTicker.Stop()
+		}
+
+		return
+	}
+
+	// if we're still leader, process the result
+
+	//if s.state != ServerStateLeader {
+	//	return
+	//}
+	//
+
+	// if log inconsistent or replication was fail, decrement next index and retry (on next heartbeat)
+	if !resp.Success {
+		if s.leaderState.nextIndex[peerID] > 1 {
+			s.leaderState.nextIndex[peerID]--
+		}
+	}
+
+	// if peer successfully replicated the entries, update our tracking
+	if len(entries) > 0 {
+		s.leaderState.matchIndex[peerID] = entries[len(entries)-1].Index
+		s.leaderState.nextIndex[peerID] = entries[len(entries)-1].Index + 1
+	}
 }
 
 func (s *Server) startElection() {
@@ -295,5 +386,37 @@ func (s *Server) startElection() {
 }
 
 func (s *Server) becomeLeader() {
+	s.mx.Lock()
+	defer s.mx.Unlock()
 
+	// only become leader if still a candidate
+	if s.state != ServerStateCandidate {
+		return
+	}
+
+	s.state = ServerStateLeader
+
+	// init leader state
+	// for each peer: track what they have replicated
+	var lastLogIndex = uint32(0)
+	if len(s.persistentState.log) > 0 {
+		lastLogIndex = s.persistentState.log[len(s.persistentState.log)-1].Index
+	}
+
+	for _, peerID := range s.peers {
+		if peerID != s.ID {
+			s.leaderState.nextIndex[peerID] = lastLogIndex + 1
+			s.leaderState.matchIndex[peerID] = 0
+		}
+	}
+
+	// stop election timer, because leaders don't hold elections
+	if s.electionTimer != nil {
+		s.electionTimer.Stop()
+	}
+
+	// heartbeats are just empty AppendEntries RPC's,
+	// they prevent followers from starting elections
+	s.heartbeatTicker = time.NewTicker(50 * time.Millisecond)
+	go s.sendHeartbeats()
 }

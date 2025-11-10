@@ -1,10 +1,8 @@
 package casual_raft
 
-import "github.com/google/uuid"
-
 type AppendEntriesRequest struct {
 	Term         uint32     // leader's term
-	LeaderID     uuid.UUID  // leader's ID
+	LeaderID     uint32     // leader's ID
 	PrevLogIndex uint32     // index of log entry immediately preceding new ones
 	PrevLogTerm  uint32     // term of prevLogIndex entry
 	Entries      []LogEntry // log entries to store (empty for heartbeat; may send more than one for efficiency)

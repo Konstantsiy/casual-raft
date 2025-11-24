@@ -26,15 +26,15 @@ type RequestVoteResponse struct {
 	VoteGranted bool   // true means a candidate received a vote
 }
 
-type raftClient struct {
+type RaftClient struct {
 	// peers represent the list of peer addresses, e.g. ["localhost:8001", "localhost:8002]
 	peers []string
 }
 
-func (c *raftClient) sendAppendEntries(serverID uint32, req *AppendEntriesRequest) (*AppendEntriesResponse, error) {
+func (c *RaftClient) SendAppendEntries(serverID uint32, req *AppendEntriesRequest) (*AppendEntriesResponse, error) {
 	return nil, nil
 }
 
-func (c *raftClient) sendRequestVote(serverID uint32, req *RequestVoteRequest) (*RequestVoteResponse, error) {
+func (c *RaftClient) SendRequestVote(serverID uint32, req *RequestVoteRequest) (*RequestVoteResponse, error) {
 	return nil, nil
 }

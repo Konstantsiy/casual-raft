@@ -1,18 +1,11 @@
-package casual_raft
+package state_machine
 
 import (
-	"encoding/binary"
 	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
-
-func TestTest(t *testing.T) {
-	var d = []byte{0x00, 0x00, 0x00, 0x03}
-	fmt.Println(int(binary.BigEndian.Uint32(d)), string(d))
-
-}
 
 func TestStateMachine_decodeCmd(t *testing.T) {
 	var (

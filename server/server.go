@@ -1,27 +1,12 @@
-package casual_raft
+package server
 
 import (
-	"encoding/binary"
-	"fmt"
+	"github.com/Konstantsiy/casual-raft"
+	"github.com/Konstantsiy/casual-raft/state-machine"
 	"math/rand"
 	"os"
 	"sync"
 	"time"
-)
-
-type ServerState int
-
-const (
-	// ServerStateFollower - normal state, receives commands from leader
-	// If no heartbeats received, becomes candidate
-	ServerStateFollower = iota
-
-	// ServerStateCandidate - trying to become leader, requests votes from other servers
-	ServerStateCandidate
-
-	// ServerStateLeader - receives client requests and replicates to followers
-	// Only 1 leader at a time in the cluster
-	ServerStateLeader
 )
 
 type Server struct {
@@ -36,115 +21,16 @@ type Server struct {
 	leaderState     leaderState     // only used when state == Leader
 
 	// current state
-	state ServerState
+	state State
 
 	electionTimer   *time.Timer  // timer that triggers election if no heartbeat received
 	heartbeatTicker *time.Ticker // ticker that sends periodic heartbeats
 
-	sm     StateMachine
-	client *raftClient
+	sm     state_machine.StateMachine
+	client *casual_raft.RaftClient
 
 	// signal to spot all goroutines
 	shutdownCh chan struct{}
-}
-
-// persist writes the persistent state to disk
-/*
-	The persistent state format is:
-	[0..3]   - currentTerm (4 bytes)
-	[4..7]   - votedFor    (4 bytes)
-	[8..11]  - logLength   (4 bytes)
-	[12..]   - logs, sequence of entries
-	each line = one entry  with format:
-	[0..3]  - term (uint32)
-	[4..7]  - index (uint32)
-	[8..11] - command length (uint32)
-	[12..]  - command bytes
-*/
-func (s *Server) persist() error {
-	s.mx.Lock()
-	defer s.mx.Unlock()
-
-	var err error
-	if err = s.fd.Truncate(0); err != nil {
-		return err
-	}
-
-	if _, err = s.fd.Seek(0, 0); err != nil {
-		return err
-	}
-
-	var header = make([]byte, 12)
-	binary.BigEndian.PutUint32(header[0:4], s.persistentState.currentTerm)
-	binary.BigEndian.PutUint32(header[4:8], s.persistentState.votedFor)
-	binary.BigEndian.PutUint32(header[8:12], uint32(len(s.persistentState.log)))
-
-	if _, err = s.fd.Write(header); err != nil {
-		return fmt.Errorf("cannot write persistent state header: %v", err)
-	}
-
-	for i, entry := range s.persistentState.log {
-		var entryHeader = make([]byte, 12)
-		binary.BigEndian.PutUint32(entryHeader[0:4], entry.Term)
-		binary.BigEndian.PutUint32(entryHeader[4:8], entry.Index)
-		binary.BigEndian.PutUint32(entryHeader[8:12], uint32(len(entry.Command)))
-
-		if _, err = s.fd.Write(entryHeader); err != nil {
-			return fmt.Errorf("cannot write [%d] log entry header: %v", i, err)
-		}
-
-		if _, err = s.fd.Write(entry.Command); err != nil {
-			return fmt.Errorf("cannot write [%d] log entry command: %v", i, err)
-		}
-	}
-
-	if err = s.fd.Sync(); err != nil {
-		return fmt.Errorf("cannot sync persistent state to disk: %v", err)
-	}
-
-	return nil
-}
-
-func (s *Server) restore() error {
-	s.mx.Lock()
-	defer s.mx.Unlock()
-
-	var err error
-	if _, err = s.fd.Seek(0, 0); err != nil {
-		return err
-	}
-
-	var header = make([]byte, 12)
-	if _, err = s.fd.Read(header); err != nil {
-		return fmt.Errorf("cannot read persistent state header: %v", err)
-	}
-
-	s.persistentState.currentTerm = binary.BigEndian.Uint32(header[0:4])
-	s.persistentState.votedFor = binary.BigEndian.Uint32(header[4:8])
-	var logLength = binary.BigEndian.Uint32(header[8:12])
-
-	s.persistentState.log = make([]LogEntry, 0, logLength)
-
-	for i := uint32(0); i < logLength; i++ {
-		var entryHeader = make([]byte, 12)
-		if _, err = s.fd.Read(entryHeader); err != nil {
-			return fmt.Errorf("cannot read [%d] log entry header: %v", i, err)
-		}
-
-		var entry LogEntry
-		entry.Term = binary.BigEndian.Uint32(entryHeader[0:4])
-		entry.Index = binary.BigEndian.Uint32(entryHeader[4:8])
-		var cmdLen = binary.BigEndian.Uint32(entryHeader[8:12])
-
-		entry.Command = make([]byte, cmdLen)
-		if _, err = s.fd.Read(entry.Command); err != nil {
-			return fmt.Errorf("cannot read [%d] log entry command: %v", i, err)
-		}
-
-		s.persistentState.log = append(s.persistentState.log, entry)
-	}
-
-	return nil
 }
 
 func (s *Server) resetElectionTimer() {
@@ -183,7 +69,7 @@ func (s *Server) sendHeartbeats() {
 		case <-s.heartbeatTicker.C:
 			// check if still leader
 			s.mx.RLock()
-			if s.state != ServerStateLeader {
+			if s.state != Leader {
 				s.mx.RUnlock()
 				return
 			}
@@ -204,7 +90,7 @@ func (s *Server) sendHeartbeats() {
 func (s *Server) replicateLog(peerID uint32) {
 	s.mx.RLock()
 
-	if s.state != ServerStateLeader {
+	if s.state != Leader {
 		s.mx.RUnlock()
 		return
 	}
@@ -231,14 +117,14 @@ func (s *Server) replicateLog(peerID uint32) {
 	}
 
 	// collect every entry from nextIndex onwards to send
-	var entries []LogEntry
+	var entries []casual_raft.LogEntry
 	for _, entry := range s.persistentState.log {
 		if entry.Index >= nextIndex {
 			entries = append(entries, entry)
 		}
 	}
 
-	var req = &AppendEntriesRequest{
+	var req = &casual_raft.AppendEntriesRequest{
 		Term:         s.persistentState.currentTerm,
 		LeaderID:     s.ID,
 		PrevLogIndex: prevLogIndex,
@@ -249,7 +135,7 @@ func (s *Server) replicateLog(peerID uint32) {
 
 	s.mx.RUnlock()
 
-	var resp, err = s.client.sendAppendEntries(peerID, req)
+	var resp, err = s.client.SendAppendEntries(peerID, req)
 	if err != nil {
 		// todo: log
 		return
@@ -262,7 +148,7 @@ func (s *Server) replicateLog(peerID uint32) {
 	if resp.Term != s.persistentState.currentTerm {
 		// we're behind, need to step down to the follower state
 		s.persistentState.currentTerm = resp.Term
-		s.state = ServerStateFollower
+		s.state = Follower
 		s.persistentState.votedFor = 0
 
 		_ = s.persist()
@@ -276,7 +162,7 @@ func (s *Server) replicateLog(peerID uint32) {
 	}
 
 	// if we're still leader, process the result
-	if s.state != ServerStateLeader {
+	if s.state != Leader {
 		return
 	}
 
@@ -298,7 +184,7 @@ func (s *Server) replicateLog(peerID uint32) {
 
 func (s *Server) updateCommitIndex() {
 	// only reader can commit index
-	if s.state != ServerStateLeader {
+	if s.state != Leader {
 		return
 	}
 
@@ -361,7 +247,7 @@ func (s *Server) startElection() {
 	s.mx.Lock()
 
 	// become a candidate
-	s.state = ServerStateCandidate
+	s.state = Candidate
 
 	// increment term (new election round)
 	s.persistentState.currentTerm++
@@ -396,7 +282,7 @@ func (s *Server) startElection() {
 		}
 
 		go func(peer uint32) {
-			var req = &RequestVoteRequest{
+			var req = &casual_raft.RequestVoteRequest{
 				Term:         currentTerm,
 				CandidateID:  s.ID,
 				LastLogIndex: lastLogIndex,
@@ -404,7 +290,7 @@ func (s *Server) startElection() {
 			}
 
 			// might fail in peer is down/slow
-			var resp, err = s.client.sendRequestVote(peer, req)
+			var resp, err = s.client.SendRequestVote(peer, req)
 			if err != nil {
 				// just ignore unreachable peer
 				// todo: add logging
@@ -416,7 +302,7 @@ func (s *Server) startElection() {
 			if resp.Term > s.persistentState.currentTerm {
 				// we're behind, need to step down
 				s.persistentState.currentTerm = resp.Term
-				s.state = ServerStateFollower
+				s.state = Follower
 				s.persistentState.votedFor = 0
 
 				_ = s.persist()
@@ -451,11 +337,11 @@ func (s *Server) becomeLeader() {
 	defer s.mx.Unlock()
 
 	// only become leader if still a candidate
-	if s.state != ServerStateCandidate {
+	if s.state != Candidate {
 		return
 	}
 
-	s.state = ServerStateLeader
+	s.state = Leader
 
 	// init leader state
 	// for each peer: track what they have replicated
@@ -480,112 +366,4 @@ func (s *Server) becomeLeader() {
 	// they prevent followers from starting elections
 	s.heartbeatTicker = time.NewTicker(50 * time.Millisecond)
 	go s.sendHeartbeats()
-}
-
-func (s *Server) HandleAppendEntries(req *AppendEntriesRequest) *AppendEntriesResponse {
-	s.mx.Lock()
-	defer s.mx.Unlock()
-
-	var resp = &AppendEntriesResponse{
-		Term:    s.persistentState.currentTerm,
-		Success: false,
-	}
-
-	// check the relevance of the requested term
-	if req.Term < s.persistentState.currentTerm {
-		return resp
-	}
-
-	// update state if term is higher
-	if req.Term > s.persistentState.currentTerm {
-		s.persistentState.currentTerm = req.Term
-		s.state = ServerStateFollower
-		s.persistentState.votedFor = 0
-		_ = s.persist()
-	}
-
-	s.resetElectionTimer()
-
-	// Check if logs contain entry at prevLogIndex with matching term,
-	// this is needed to ensure logs are consistent
-	// e.g. if leader has entries [1,2,3] and follower has [1,2,4],
-	// when leader tries to append entry 5 after 3, follower must reject,
-	// because its log is inconsistent (it doesn't have entry 3).
-	// So follower rejects, and on the next heartbeat leader must decrement nextIndex and retry
-	// that means leader will send entry 3 again.
-	// Follower will see that entry 3 doesn't match its entry 4,
-	// follower will delete entry 4 and append entry 3, then 5 - this way logs become consistent.
-	// If logs are empty, prevLogIndex is 0 and this check is skipped.
-	if req.PrevLogIndex > 0 {
-		var found = false
-
-		for _, entry := range s.persistentState.log {
-			if entry.Index == req.PrevLogIndex {
-				if entry.Term != req.PrevLogTerm {
-					return resp
-				}
-
-				found = true
-				break
-			}
-		}
-
-		if !found {
-			return resp
-		}
-	}
-
-	// Append any new entries not already in the log
-	for _, newEntry := range req.Entries {
-		var found = false
-
-		for i, entry := range s.persistentState.log {
-			if entry.Index == newEntry.Index {
-				if entry.Term != newEntry.Term {
-					// delete all entries from this index onwards, because they are conflicted
-					s.persistentState.log = s.persistentState.log[:i]
-					// append the new entry
-					s.persistentState.log = append(s.persistentState.log, newEntry)
-				}
-			}
-
-			found = true
-			break
-		}
-
-		if !found {
-			s.persistentState.log = append(s.persistentState.log, newEntry)
-		}
-	}
-
-	if len(req.Entries) > 0 {
-		// we have new entries, persist the state
-		_ = s.persist()
-	}
-
-	// update commit index
-	if req.LeaderCommit > s.volatileState.commitedIndex {
-		// this is the highest index known to be commited on leader
-		var lastNewEntryIndex = uint32(0)
-
-		if len(req.Entries) > 0 {
-			// if we have new entries, the last one is the highest
-			lastNewEntryIndex = req.Entries[len(req.Entries)-1].Index
-		}
-
-		if req.LeaderCommit > lastNewEntryIndex {
-			// if leaderCommit is higher than our last new entry, set to leaderCommit,
-			// e.g., when there are no new entries
-			s.volatileState.commitedIndex = req.LeaderCommit
-		} else if lastNewEntryIndex > 0 {
-			// otherwise set to last new entry index
-			s.volatileState.commitedIndex = lastNewEntryIndex
-		}
-
-		// apply commited entries to state machine
-		s.applyCommitedEntries()
-	}
-
-	resp.Success = true
-	return resp
 }

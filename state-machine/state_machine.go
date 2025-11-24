@@ -1,4 +1,4 @@
-package casual_raft
+package state_machine
 
 import (
 	"encoding/binary"

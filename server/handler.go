@@ -111,3 +111,58 @@ func (s *Server) HandleAppendEntries(req *casualraft.AppendEntriesRequest) *casu
 	resp.Success = true
 	return resp
 }
+
+func (s *Server) HandleRequestVote(req *casualraft.RequestVoteRequest) *casualraft.RequestVoteResponse {
+	s.mx.Lock()
+	defer s.mx.Unlock()
+
+	var resp = &casualraft.RequestVoteResponse{
+		Term:        s.persistentState.currentTerm,
+		VoteGranted: false,
+	}
+
+	// check the relevance of the requested term, reject if it's lower
+	if req.Term < s.persistentState.currentTerm {
+		return resp
+	}
+
+	// update state if term is higher
+	if req.Term > s.persistentState.currentTerm {
+		s.persistentState.currentTerm = req.Term
+		s.state = Follower
+		s.persistentState.votedFor = 0
+		_ = s.persist()
+	}
+
+	// check if we've already voted in this term
+	if s.persistentState.votedFor != 0 && s.persistentState.votedFor != req.CandidateID {
+		return resp
+	}
+
+	var lastLogIndex = uint32(0)
+	var lastLogTerm = uint32(0)
+
+	// determine our last log index and term,
+	// needed for candidate log up-to-date check
+	if len(s.persistentState.log) > 0 {
+		var lastEntry = s.persistentState.log[len(s.persistentState.log)-1]
+		lastLogIndex = lastEntry.Index
+		lastLogTerm = lastEntry.Term
+	}
+
+	// check if candidate's log is at least as up-to-date as receiver's log
+	// (section 5.4.1 of Raft thesis: https://raft.github.io/raft.pdf)
+	// if candidate's log is more up-to-date, grant vote, otherwise, deny vote
+	var logUpToDate = req.LastLogTerm > lastLogTerm ||
+		(req.LastLogTerm == lastLogTerm && req.LastLogIndex > lastLogIndex)
+
+	if logUpToDate {
+		// grant vote
+		s.persistentState.votedFor = req.CandidateID
+		_ = s.persist()
+		s.resetElectionTimer()
+		resp.VoteGranted = true
+	}
+
+	return resp
+}

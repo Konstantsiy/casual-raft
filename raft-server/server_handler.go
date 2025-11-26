@@ -1,14 +1,37 @@
 package server
 
-import (
-	casualraft "github.com/Konstantsiy/casual-raft"
-)
+import "errors"
 
-func (s *Server) HandleAppendEntries(req *casualraft.AppendEntriesRequest) *casualraft.AppendEntriesResponse {
+func (s *Server) HandleAppendCommand(cmd []byte) error {
 	s.mx.Lock()
 	defer s.mx.Unlock()
 
-	var resp = &casualraft.AppendEntriesResponse{
+	if s.state != Leader {
+		return errors.New("server is not leader")
+	}
+
+	lastIndex := uint32(0)
+	if len(s.persistentState.log) > 0 {
+		lastIndex = s.persistentState.log[len(s.persistentState.log)-1].Index
+	}
+
+	entry := logEntry{
+		Index:   lastIndex,
+		Term:    s.persistentState.currentTerm,
+		Command: cmd,
+	}
+
+	s.persistentState.log = append(s.persistentState.log, entry)
+	_ = s.persist()
+
+	return nil
+}
+
+func (s *Server) HandleAppendEntries(req *AppendEntriesRequest) *AppendEntriesResponse {
+	s.mx.Lock()
+	defer s.mx.Unlock()
+
+	var resp = &AppendEntriesResponse{
 		Term:    s.persistentState.currentTerm,
 		Success: false,
 	}
@@ -112,11 +135,11 @@ func (s *Server) HandleAppendEntries(req *casualraft.AppendEntriesRequest) *casu
 	return resp
 }
 
-func (s *Server) HandleRequestVote(req *casualraft.RequestVoteRequest) *casualraft.RequestVoteResponse {
+func (s *Server) HandleRequestVote(req *RequestVoteRequest) *RequestVoteResponse {
 	s.mx.Lock()
 	defer s.mx.Unlock()
 
-	var resp = &casualraft.RequestVoteResponse{
+	var resp = &RequestVoteResponse{
 		Term:        s.persistentState.currentTerm,
 		VoteGranted: false,
 	}

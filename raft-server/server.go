@@ -1,7 +1,7 @@
 package server
 
 import (
-	"github.com/Konstantsiy/casual-raft"
+	"fmt"
 	"github.com/Konstantsiy/casual-raft/state-machine"
 	"math/rand"
 	"os"
@@ -27,10 +27,72 @@ type Server struct {
 	heartbeatTicker *time.Ticker // ticker that sends periodic heartbeats
 
 	sm     state_machine.StateMachine
-	client *casual_raft.RaftClient
+	client *RaftClient
 
 	// signal to spot all goroutines
 	shutdownCh chan struct{}
+}
+
+func NewServer(id uint32, peers []uint32, dataDir string, client *RaftClient) (*Server, error) {
+	dirPath := fmt.Sprintf("%s/server-%d.dat", dataDir, id)
+	fd, err := os.OpenFile(dirPath, os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		return nil, err
+	}
+
+	server := &Server{
+		ID:    id,
+		peers: peers,
+		fd:    fd,
+		state: Follower,
+		leaderState: leaderState{
+			nextIndex:  make(map[uint32]uint32),
+			matchIndex: make(map[uint32]uint32),
+		},
+		volatileState: volatileState{
+			commitedIndex: 0,
+			lastApplied:   0,
+		},
+		sm:         state_machine.New(),
+		client:     client,
+		shutdownCh: make(chan struct{}),
+	}
+
+	if err = server.restore(); err != nil {
+		server.persistentState.log = make([]logEntry, 0)
+		server.persistentState.currentTerm = 0
+		server.persistentState.votedFor = 0
+	}
+
+	return server, err
+}
+
+func (s *Server) Start() {
+	// start election timer, needed for follower and candidate states,
+	// because leaders don't hold elections, they stop the timer
+	s.resetElectionTimer()
+	go s.run()
+}
+
+func (s *Server) Shutdown() {
+	close(s.shutdownCh)
+
+	if s.electionTimer != nil {
+		s.electionTimer.Stop()
+	}
+
+	if s.heartbeatTicker != nil {
+		s.heartbeatTicker.Stop()
+	}
+
+	_ = s.fd.Close()
+}
+
+func (s *Server) State() (uint32, bool) {
+	s.mx.Lock()
+	defer s.mx.Unlock()
+
+	return s.persistentState.currentTerm, s.state == Leader
 }
 
 func (s *Server) resetElectionTimer() {
@@ -117,14 +179,14 @@ func (s *Server) replicateLog(peerID uint32) {
 	}
 
 	// collect every entry from nextIndex onwards to send
-	var entries []casual_raft.LogEntry
+	var entries []logEntry
 	for _, entry := range s.persistentState.log {
 		if entry.Index >= nextIndex {
 			entries = append(entries, entry)
 		}
 	}
 
-	var req = &casual_raft.AppendEntriesRequest{
+	var req = &AppendEntriesRequest{
 		Term:         s.persistentState.currentTerm,
 		LeaderID:     s.ID,
 		PrevLogIndex: prevLogIndex,
@@ -135,7 +197,7 @@ func (s *Server) replicateLog(peerID uint32) {
 
 	s.mx.RUnlock()
 
-	var resp, err = s.client.SendAppendEntries(peerID, req)
+	var resp, err = s.client.sendAppendEntries(peerID, req)
 	if err != nil {
 		// todo: log
 		return
@@ -282,7 +344,7 @@ func (s *Server) startElection() {
 		}
 
 		go func(peer uint32) {
-			var req = &casual_raft.RequestVoteRequest{
+			var req = &RequestVoteRequest{
 				Term:         currentTerm,
 				CandidateID:  s.ID,
 				LastLogIndex: lastLogIndex,
@@ -290,7 +352,7 @@ func (s *Server) startElection() {
 			}
 
 			// might fail in peer is down/slow
-			var resp, err = s.client.SendRequestVote(peer, req)
+			var resp, err = s.client.sendRequestVote(peer, req)
 			if err != nil {
 				// just ignore unreachable peer
 				// todo: add logging

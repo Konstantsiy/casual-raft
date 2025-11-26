@@ -3,7 +3,6 @@ package server
 import (
 	"encoding/binary"
 	"fmt"
-	"github.com/Konstantsiy/casual-raft"
 )
 
 type State int
@@ -32,7 +31,7 @@ type persistentState struct {
 	votedFor uint32
 
 	// log is a sequence of commands for state machine
-	log []casual_raft.LogEntry
+	log []logEntry
 }
 
 // volatileState represents data that can be rebuilt after a crash, kept im memory
@@ -131,7 +130,7 @@ func (s *Server) restore() error {
 	s.persistentState.votedFor = binary.BigEndian.Uint32(header[4:8])
 	var logLength = binary.BigEndian.Uint32(header[8:12])
 
-	s.persistentState.log = make([]casual_raft.LogEntry, 0, logLength)
+	s.persistentState.log = make([]logEntry, 0, logLength)
 
 	for i := uint32(0); i < logLength; i++ {
 		var entryHeader = make([]byte, 12)
@@ -139,7 +138,7 @@ func (s *Server) restore() error {
 			return fmt.Errorf("cannot read [%d] log entry header: %v", i, err)
 		}
 
-		var entry casual_raft.LogEntry
+		var entry logEntry
 		entry.Term = binary.BigEndian.Uint32(entryHeader[0:4])
 		entry.Index = binary.BigEndian.Uint32(entryHeader[4:8])
 		var cmdLen = binary.BigEndian.Uint32(entryHeader[8:12])

@@ -1,6 +1,6 @@
-package casual_raft
+package server
 
-type LogEntry struct {
+type logEntry struct {
 	Index   uint32 // log index starting from 1
 	Term    uint32 // term when entry was received by leader
 	Command []byte // command for state machine

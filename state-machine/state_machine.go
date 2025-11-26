@@ -10,6 +10,12 @@ type StateMachine interface {
 	Apply(cmd []byte) ([]byte, error)
 }
 
+func New() StateMachine {
+	return &stateMachine{
+		db: &sync.Map{},
+	}
+}
+
 // stateMachine is a simple in-memory key-value state machine
 type stateMachine struct {
 	db *sync.Map

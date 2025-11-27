@@ -158,7 +158,8 @@ func (s *Server) HandleRequestVote(req *RequestVoteRequest) *RequestVoteResponse
 	}
 
 	// check if we've already voted in this term
-	if s.persistentState.votedFor != 0 && s.persistentState.votedFor != req.CandidateID {
+	if s.persistentState.votedFor != 0 &&
+		s.persistentState.votedFor != req.CandidateID {
 		return resp
 	}
 
@@ -173,17 +174,24 @@ func (s *Server) HandleRequestVote(req *RequestVoteRequest) *RequestVoteResponse
 		lastLogTerm = lastEntry.Term
 	}
 
-	// check if candidate's log is at least as up-to-date as receiver's log
+	// check if candidate's log is at least as up to date as receiver's log
 	// (section 5.4.1 of Raft thesis: https://raft.github.io/raft.pdf)
+	//
 	// if candidate's log is more up-to-date, grant vote, otherwise, deny vote
 	var logUpToDate = req.LastLogTerm > lastLogTerm ||
-		(req.LastLogTerm == lastLogTerm && req.LastLogIndex > lastLogIndex)
+		(req.LastLogTerm == lastLogTerm && req.LastLogIndex >= lastLogIndex)
 
 	if logUpToDate {
 		// grant vote
 		s.persistentState.votedFor = req.CandidateID
-		_ = s.persist()
+
+		if err := s.persist(); err != nil {
+			// don't grant a vote if server can't persist
+			return resp
+		}
+
 		s.resetElectionTimer()
+
 		resp.VoteGranted = true
 	}
 

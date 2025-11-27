@@ -64,7 +64,7 @@ func NewServer(id uint32, peers []uint32, dataDir string, client *RaftClient) (*
 		server.persistentState.votedFor = 0
 	}
 
-	return server, err
+	return server, nil
 }
 
 func (s *Server) Start() {

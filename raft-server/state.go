@@ -55,6 +55,13 @@ type leaderState struct {
 	matchIndex map[uint32]uint32
 }
 
+func (s *Server) persistLocked() error {
+	s.mx.Lock()
+	defer s.mx.Unlock()
+
+	return s.persist()
+}
+
 // persist writes the persistent state to disk
 /*
 	The persistent state format is:
@@ -69,9 +76,6 @@ type leaderState struct {
 	[12..]  - command bytes
 */
 func (s *Server) persist() error {
-	s.mx.Lock()
-	defer s.mx.Unlock()
-
 	var err error
 	if err = s.fd.Truncate(0); err != nil {
 		return err

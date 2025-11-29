@@ -8,15 +8,20 @@ import (
 	"time"
 )
 
-type RaftClient struct {
+type RaftClient interface {
+	sendAppendEntries(uint32, *AppendEntriesRequest) (*AppendEntriesResponse, error)
+	sendRequestVote(uint32, *RequestVoteRequest) (*RequestVoteResponse, error)
+}
+
+type raftClient struct {
 	// peers represent the list of peer addresses, e.g. ["localhost:8001", "localhost:8002]
 	peers []string
 	// todo: add grpc later
 	httpClient *http.Client
 }
 
-func NewRaftClient(peers []string) *RaftClient {
-	return &RaftClient{
+func NewRaftClient(peers []string) RaftClient {
+	return &raftClient{
 		peers: peers,
 		httpClient: &http.Client{
 			Timeout: 100 * time.Millisecond,
@@ -24,7 +29,7 @@ func NewRaftClient(peers []string) *RaftClient {
 	}
 }
 
-func (c *RaftClient) sendAppendEntries(serverID uint32, req *AppendEntriesRequest) (*AppendEntriesResponse, error) {
+func (c *raftClient) sendAppendEntries(serverID uint32, req *AppendEntriesRequest) (*AppendEntriesResponse, error) {
 	if int(serverID) >= len(c.peers) { // todo: change to UUID
 		return nil, fmt.Errorf("invalid server ID: %d", serverID)
 	}
@@ -54,7 +59,7 @@ func (c *RaftClient) sendAppendEntries(serverID uint32, req *AppendEntriesReques
 	return &res, nil
 }
 
-func (c *RaftClient) sendRequestVote(serverID uint32, req *RequestVoteRequest) (*RequestVoteResponse, error) {
+func (c *raftClient) sendRequestVote(serverID uint32, req *RequestVoteRequest) (*RequestVoteResponse, error) {
 	if int(serverID) >= len(c.peers) { // todo: change to UUID
 		return nil, fmt.Errorf("invalid server ID: %d", serverID)
 	}

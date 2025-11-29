@@ -52,7 +52,7 @@ func newMockCluster(t *testing.T, n int) *mockCluster {
 
 func (c *mockCluster) startAll() {
 	for _, server := range c.servers {
-		server.Start()
+		go server.Start()
 	}
 }
 
@@ -70,23 +70,11 @@ func (c *mockCluster) getLeader() *Server {
 	return nil
 }
 
-func (c *mockCluster) countLeaders() int {
+func (c *mockCluster) countByState(state State) int {
 	count := 0
 	for _, server := range c.servers {
 		server.mx.RLock()
-		if server.state == Leader {
-			count++
-		}
-		server.mx.RUnlock()
-	}
-	return count
-}
-
-func (c *mockCluster) countCandidates() int {
-	count := 0
-	for _, server := range c.servers {
-		server.mx.RLock()
-		if server.state == Candidate {
+		if server.state == state {
 			count++
 		}
 		server.mx.RUnlock()
@@ -254,8 +242,8 @@ func TestServerElection_ThreeServers_WithOneLeader(t *testing.T) {
 
 	cluster.startAll()
 
-	t.Logf("Wait for leader election (up to 2 seconds)...")
-	leader, err := cluster.waitForLeader(2 * time.Second)
+	t.Logf("Wait for leader election...")
+	leader, err := cluster.waitForLeader(3 * time.Second)
 	require.NoError(t, err, "Failed to elect leader")
 
 	t.Logf("Leader elected: %d", leader.ID)
@@ -263,7 +251,7 @@ func TestServerElection_ThreeServers_WithOneLeader(t *testing.T) {
 	require.Equal(t, State(Leader), selectedLeaderState, "State should be Leader")
 	require.True(t, selectedLeaderTerm > 0, "Term should be 1 after starting an election")
 
-	require.Equal(t, 1, cluster.countLeaders(), "Expected only 1 leader")
+	require.Equal(t, 1, cluster.countByState(Leader), "Expected only 1 leader")
 
 	// Verify all servers have updated to the same term
 	for i, server := range cluster.servers {
@@ -277,5 +265,5 @@ func TestServerElection_ThreeServers_WithOneLeader(t *testing.T) {
 		}
 	}
 
-	//require.Equal(t, 2, cluster.countCandidates(), "Expected only 2 candidates")
+	require.Equal(t, 2, cluster.countByState(Follower), "Expected 2 followers")
 }

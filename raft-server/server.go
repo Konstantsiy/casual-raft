@@ -67,13 +67,13 @@ func NewServer(id uint32, peers []uint32, dataDir string, client RaftClient) (*S
 }
 
 func (s *Server) Start() {
-	fmt.Printf("[%d] Start() called\n", s.ID)
+	fmt.Printf("[%d] Started\n", s.ID)
 	// start election timer, needed for follower and candidate states,
 	// because leaders don't hold elections, they stop the timer
 	s.resetElectionTimer()
 	fmt.Printf("[%d] Timer reset\n", s.ID)
 
-	time.Sleep(10 * time.Millisecond)
+	//time.Sleep(10 * time.Millisecond)
 
 	go func() {
 		// main cycle for each server, it waits for events and handle them

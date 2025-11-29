@@ -15,7 +15,7 @@ func setupTestServer(t *testing.T, serverID uint32, peers []uint32) *Server {
 	return server
 }
 
-func TestServerPersisAndRestore(t *testing.T) {
+func TestServer_PersisAndRestore(t *testing.T) {
 	testDir := t.TempDir()
 	testClient := NewRaftClient([]string{})
 
@@ -86,4 +86,54 @@ func TestServer_RequestVote(t *testing.T) {
 	// grant vote for a different candidate in new term
 	resp3 := server.HandleRequestVote(req3)
 	require.True(t, resp3.VoteGranted)
+}
+
+func TestServer_AppendEntries(t *testing.T) {
+	server := setupTestServer(t, 1, []uint32{1, 2, 3})
+	defer server.Shutdown()
+
+	// just a heartbeat with an empty entries
+	req := &AppendEntriesRequest{
+		Term:         1,
+		LeaderID:     2,
+		PrevLogIndex: 0,
+		PrevLogTerm:  0,
+		Entries:      []logEntry{},
+		LeaderCommit: 0,
+	}
+
+	resp := server.HandleAppendEntries(req)
+	require.True(t, resp.Success)
+	require.Equal(t, uint32(1), server.persistentState.currentTerm)
+
+	// append new entry
+	req = &AppendEntriesRequest{
+		Term:         1,
+		LeaderID:     2,
+		PrevLogIndex: 0,
+		PrevLogTerm:  0,
+		Entries: []logEntry{
+			{Index: 1, Term: 1, Command: []byte("cmd1")},
+		},
+		LeaderCommit: 0,
+	}
+
+	resp = server.HandleAppendEntries(req)
+	require.True(t, resp.Success)
+	require.Len(t, server.persistentState.log, 1)
+
+	// reject request, because prevLogIndex doesn't match
+	req = &AppendEntriesRequest{
+		Term:         1,
+		LeaderID:     2,
+		PrevLogIndex: 5,
+		PrevLogTerm:  1,
+		Entries: []logEntry{
+			{Index: 6, Term: 1, Command: []byte("cmd1")},
+		},
+		LeaderCommit: 0,
+	}
+
+	resp = server.HandleAppendEntries(req)
+	require.False(t, resp.Success)
 }

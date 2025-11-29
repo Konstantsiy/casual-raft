@@ -236,8 +236,9 @@ func TestServerElection_SingleServerBecomesCandidate(t *testing.T) {
 	require.Equal(t, serverID, votedFor, "Expected server to vote for itself")
 }
 
-func TestServerElection_ThreeServers_WithOneLeader(t *testing.T) {
-	cluster := newMockCluster(t, 3)
+func TestServerElection_FiveServers_OneLeader_WithNetworkPartition(t *testing.T) {
+	numOfServers := 5
+	cluster := newMockCluster(t, numOfServers)
 	defer cluster.shutdown()
 
 	cluster.startAll()
@@ -253,10 +254,9 @@ func TestServerElection_ThreeServers_WithOneLeader(t *testing.T) {
 
 	require.Equal(t, 1, cluster.countByState(Leader), "Expected only 1 leader")
 
-	// Verify all servers have updated to the same term
+	// verify all servers have updated to the same term
 	for i, server := range cluster.servers {
 		state, term := cluster.getServerStateAndTerm(server.ID)
-
 		t.Logf("Server %d: state=%d term=%d", i, state, term)
 
 		// all servers should be on the same term or close to it
@@ -265,5 +265,41 @@ func TestServerElection_ThreeServers_WithOneLeader(t *testing.T) {
 		}
 	}
 
-	require.Equal(t, 2, cluster.countByState(Follower), "Expected 2 followers")
+	// verify cluster counted at least 4 voteRequest calls for 5 serves
+	// from the perspective of leader server
+	expectedNumOfFollowers := numOfServers - 1
+	numOfFollowers := cluster.countByState(Follower)
+
+	require.Equal(t, expectedNumOfFollowers, numOfFollowers,
+		"Expected %d followers, got %d", expectedNumOfFollowers, numOfFollowers)
+
+	rpcClient, _ := cluster.mockClient.(*mockRaftClient)
+	totalVoteRequests := int(rpcClient.requestVoteCalls.Load())
+	t.Logf("Total vote requests: %d", totalVoteRequests)
+
+	require.False(t, totalVoteRequests < 4,
+		"Expected at least 4 VoteRequest calls, got %d", totalVoteRequests)
+
+	t.Logf("Disconnect 2 servers...")
+	rpcClient.disconnect(cluster.serverIDs[1])
+	rpcClient.disconnect(cluster.serverIDs[2])
+
+	// wait for election timeout
+	newLeader, err := cluster.waitForLeader(3 * time.Second)
+	require.NoError(t, err, "Failed to elect leader")
+	t.Logf("New leader elected: %d", newLeader.ID)
+
+	t.Logf("Restore 2 servers...")
+	rpcClient.reconnect(cluster.serverIDs[1])
+	rpcClient.reconnect(cluster.serverIDs[2])
+
+	// wait for the cluster to stabilize
+	time.Sleep(1 * time.Second)
+
+	leader, err = cluster.waitForLeader(2 * time.Second)
+	require.NoError(t, err)
+
+	// check that we still have only 1 leader
+	numOfLeaders := cluster.countByState(Leader)
+	require.Equal(t, 1, numOfLeaders, "Should be 1 leader, got %d", numOfLeaders)
 }

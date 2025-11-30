@@ -2,7 +2,7 @@ package server
 
 import "errors"
 
-func (s *Server) HandleAppendCommand(cmd []byte) error {
+func (s *Server) HandleCommand(cmd []byte) error {
 	s.mx.Lock()
 	defer s.mx.Unlock()
 
@@ -41,7 +41,7 @@ func (s *Server) HandleAppendEntries(req *AppendEntriesRequest) *AppendEntriesRe
 		return resp
 	}
 
-	// update state if term is higher
+	// update to the Follower state if requested term is higher
 	if req.Term > s.persistentState.currentTerm {
 		s.persistentState.currentTerm = req.Term
 		s.state = Follower
@@ -56,8 +56,10 @@ func (s *Server) HandleAppendEntries(req *AppendEntriesRequest) *AppendEntriesRe
 	// e.g. if leader has entries [1,2,3] and follower has [1,2,4],
 	// when leader tries to append entry 5 after 3, follower must reject,
 	// because its log is inconsistent (it doesn't have entry 3).
+	//
 	// So follower rejects, and on the next heartbeat leader must decrement nextIndex and retry
 	// that means leader will send entry 3 again.
+	//
 	// Follower will see that entry 3 doesn't match its entry 4,
 	// follower will delete entry 4 and append entry 3, then 5 - this way logs become consistent.
 	// If logs are empty, prevLogIndex is 0 and this check is skipped.
@@ -76,11 +78,12 @@ func (s *Server) HandleAppendEntries(req *AppendEntriesRequest) *AppendEntriesRe
 		}
 
 		if !found {
+			// reject request, because we don't find a point to write
 			return resp
 		}
 	}
 
-	// Append any new entries not already in the log
+	// append any new entries not already in the log
 	for _, newEntry := range req.Entries {
 		var found = false
 
@@ -92,10 +95,10 @@ func (s *Server) HandleAppendEntries(req *AppendEntriesRequest) *AppendEntriesRe
 					// append the new entry
 					s.persistentState.log = append(s.persistentState.log, newEntry)
 				}
-			}
 
-			found = true
-			break
+				found = true
+				break
+			}
 		}
 
 		if !found {
@@ -149,7 +152,7 @@ func (s *Server) HandleRequestVote(req *RequestVoteRequest) *RequestVoteResponse
 		return resp
 	}
 
-	// update state if term is higher
+	// update to the Follower state if requested term is higher
 	if req.Term > s.persistentState.currentTerm {
 		s.persistentState.currentTerm = req.Term
 		s.state = Follower
@@ -158,8 +161,7 @@ func (s *Server) HandleRequestVote(req *RequestVoteRequest) *RequestVoteResponse
 	}
 
 	// check if we've already voted in this term
-	if s.persistentState.votedFor != 0 &&
-		s.persistentState.votedFor != req.CandidateID {
+	if s.persistentState.votedFor != 0 && s.persistentState.votedFor != req.CandidateID {
 		return resp
 	}
 
@@ -178,10 +180,10 @@ func (s *Server) HandleRequestVote(req *RequestVoteRequest) *RequestVoteResponse
 	// (section 5.4.1 of Raft thesis: https://raft.github.io/raft.pdf)
 	//
 	// if candidate's log is more up-to-date, grant vote, otherwise, deny vote
-	var logUpToDate = req.LastLogTerm > lastLogTerm ||
+	var isCandidateLogUpToDate = req.LastLogTerm > lastLogTerm ||
 		(req.LastLogTerm == lastLogTerm && req.LastLogIndex >= lastLogIndex)
 
-	if logUpToDate {
+	if isCandidateLogUpToDate {
 		// grant vote
 		s.persistentState.votedFor = req.CandidateID
 

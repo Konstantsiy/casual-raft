@@ -41,21 +41,21 @@ func main() {
 	}
 
 	client := raftserver.NewRaftClient(peersAddresses)
-	s, err := raftserver.NewServer(uint32(*id), peersIDs, *dataDir, client)
+	server, err := raftserver.NewServer(uint32(*id), peersIDs, *dataDir, client)
 	if err != nil {
 		log.Fatal("Failed to create server")
 	}
 
-	s.Shutdown()
-	defer s.Shutdown()
+	server.Shutdown()
+	defer server.Shutdown()
 
-	handler := raftserver.NewHTTPHandler(s)
+	handler := raftserver.NewHTTPHandler(server)
 	mux := http.NewServeMux()
 	handler.RegisterHandlers(mux)
 
 	// set healthcheck
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		term, isLeader := s.State()
+		term, isLeader := server.State()
 		log.Printf("Health check: term=%d isLeader=%t", term, isLeader)
 	})
 

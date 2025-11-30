@@ -57,7 +57,7 @@ func (h *HTTPHandler) handleCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.server.HandleAppendCommand(cmd); err != nil {
+	if err := h.server.HandleCommand(cmd); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

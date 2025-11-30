@@ -60,6 +60,7 @@ func (s *Server) startElection() {
 			continue
 		}
 
+		// request votes for other peers
 		go func(peer uint32) {
 			var req = &RequestVoteRequest{
 				Term:         currentTerm,

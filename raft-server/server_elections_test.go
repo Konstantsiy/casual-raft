@@ -303,3 +303,85 @@ func TestServerElection_FiveServers_OneLeader_WithNetworkPartition(t *testing.T)
 	numOfLeaders := cluster.countByState(Leader)
 	require.Equal(t, 1, numOfLeaders, "Should be 1 leader, got %d", numOfLeaders)
 }
+
+func TestServerReplication_EndToEnd(t *testing.T) {
+	cluster := newMockCluster(t, 5)
+	defer cluster.shutdown()
+
+	cluster.startAll()
+
+	t.Log("Waiting for leader election...")
+	leader, err := cluster.waitForLeader(3 * time.Second)
+	require.NoError(t, err, "Failed to elect leader")
+	t.Logf("Leader elected: server %d", leader.ID)
+
+	cmd := []byte("SET key1 value1")
+
+	t.Log("Sending command to leader...")
+	err = leader.HandleCommand(cmd)
+	require.NoError(t, err, "Failed to append command")
+
+	// the command should be replicated and committed on all servers
+	t.Log("Waiting for log replication...")
+	err = cluster.waitForCondition(5*time.Second, func() bool {
+		// check that all servers have the log entry
+		for _, server := range cluster.servers {
+			server.mx.RLock()
+			logLen := len(server.persistentState.log)
+			server.mx.RUnlock()
+
+			if logLen < 1 {
+				return false
+			}
+		}
+		return true
+	})
+	require.NoError(t, err, "Log not replicated to all servers within timeout")
+
+	// verify log entry on all servers
+	for _, server := range cluster.servers {
+		server.mx.RLock()
+		logs := server.persistentState.log
+		server.mx.RUnlock()
+
+		require.Len(t, logs, 1, "Server %d should have 1 log entry", server.ID)
+		require.Equal(t, cmd, logs[0].Command, "Server %d has incorrect command", server.ID)
+		require.Equal(t, uint32(1), logs[0].Index, "Server %d has incorrect log index", server.ID)
+
+		t.Logf("Server %d: log[0] = {Index: %d, Term: %d, Command: %s}",
+			server.ID, logs[0].Index, logs[0].Term, string(logs[0].Command))
+	}
+
+	// wait for commits to propagate
+	t.Log("Waiting for commits to propagate...")
+	err = cluster.waitForCondition(3*time.Second, func() bool {
+		for _, server := range cluster.servers {
+			server.mx.RLock()
+			committed := server.volatileState.commitedIndex
+			server.mx.RUnlock()
+
+			if committed < 1 {
+				return false
+			}
+		}
+		return true
+	})
+	require.NoError(t, err, "Commits not propagated to all servers within timeout")
+
+	// verify commit index on all servers
+	t.Log("Verifying commit indices...")
+	for _, server := range cluster.servers {
+		server.mx.RLock()
+		commitIndex := server.volatileState.commitedIndex
+		lastApplied := server.volatileState.lastApplied
+		server.mx.RUnlock()
+
+		require.GreaterOrEqual(t, commitIndex, uint32(1),
+			"Server %d should have committed index >= 1", server.ID)
+		require.GreaterOrEqual(t, lastApplied, uint32(1),
+			"Server %d should have applied index >= 1", server.ID)
+
+		t.Logf("Server %d: commitIndex=%d, lastApplied=%d",
+			server.ID, commitIndex, lastApplied)
+	}
+}

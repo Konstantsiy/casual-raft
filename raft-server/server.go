@@ -161,6 +161,7 @@ func (s *Server) replicateLog(peerID uint32) {
 	var prevLogTerm = uint32(0)
 
 	if prevLogIndex > 0 {
+		// determine previous log term
 		for _, entry := range s.persistentState.log {
 			if entry.Index == prevLogIndex {
 				prevLogTerm = entry.Term

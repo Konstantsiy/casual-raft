@@ -56,6 +56,12 @@ func (c *mockCluster) startAll() {
 	}
 }
 
+func (c *mockCluster) shutdown() {
+	for _, server := range c.servers {
+		server.Shutdown()
+	}
+}
+
 func (c *mockCluster) getLeader() *Server {
 	for _, server := range c.servers {
 		server.mx.RLock()
@@ -106,12 +112,6 @@ func (c *mockCluster) waitForCondition(timeout time.Duration, condition func() b
 		time.Sleep(10 * time.Millisecond)
 	}
 	return fmt.Errorf("condition not met within timeout")
-}
-
-func (c *mockCluster) shutdown() {
-	for _, server := range c.servers {
-		server.Shutdown()
-	}
 }
 
 func (c *mockCluster) getServerStateAndTerm(id uint32) (State, uint32) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	docker_network "github.com/testcontainers/testcontainers-go/network"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -96,7 +97,7 @@ type testRaftCluster struct {
 	networkIPs []string
 }
 
-func newCluster(t *testing.T, ctx context.Context, nodesCount int) (*testRaftCluster, error) {
+func newE2eTestCluster(t *testing.T, ctx context.Context, nodesCount int) (*testRaftCluster, error) {
 	testDockerNetwork, err := docker_network.New(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to start docker network: %v", err)
@@ -223,7 +224,7 @@ func (c *testRaftCluster) getLeader() (*testRaftNode, error) {
 	return nil, fmt.Errorf("no leader found")
 }
 
-func (c *testRaftCluster) WaitForLeader(t *testing.T, timeout time.Duration) (*testRaftNode, error) {
+func (c *testRaftCluster) waitForLeader(t *testing.T, timeout time.Duration) (*testRaftNode, error) {
 	deadline := time.Now().Add(timeout)
 
 	for time.Now().Before(deadline) {
@@ -239,7 +240,7 @@ func (c *testRaftCluster) WaitForLeader(t *testing.T, timeout time.Duration) (*t
 	return nil, fmt.Errorf("no leader elected within timeout")
 }
 
-func (c *testRaftCluster) StopNode(t *testing.T, nodeID uint32) error {
+func (c *testRaftCluster) stopNode(t *testing.T, nodeID uint32) error {
 	for _, node := range c.nodes {
 		if node.id == nodeID {
 			t.Logf("Stopping node %d", nodeID)
@@ -249,12 +250,57 @@ func (c *testRaftCluster) StopNode(t *testing.T, nodeID uint32) error {
 	return fmt.Errorf("node %d not found", nodeID)
 }
 
-func (c *testRaftCluster) StartNode(t *testing.T, nodeID uint32) error {
-	for _, node := range c.nodes {
-		if node.id == nodeID {
-			t.Logf("Starting node %d", nodeID)
-			return node.container.Start(c.ctx)
+func TestE2E(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping E2E tests in short mode")
+	}
+
+	ctx := context.Background()
+	nodesCount := 5
+
+	cluster, err := newE2eTestCluster(t, ctx, nodesCount)
+	require.NoError(t, err)
+	defer cluster.shutdown()
+
+	t.Logf("Cluster created with %d nodes", nodesCount)
+	t.Logf("Waiting for leader election...")
+
+	leader, err := cluster.waitForLeader(t, 10*time.Second)
+	require.NoError(t, err)
+	require.NotNil(t, leader)
+
+	t.Logf("Leader elected: node %d", leader.id)
+
+	leaderCount := 0
+	for _, node := range cluster.nodes {
+		isLeader, _err := node.isLeader()
+		if _err == nil && isLeader {
+			leaderCount++
 		}
 	}
-	return fmt.Errorf("node %d not found", nodeID)
+
+	// verify only one leader exists
+	require.Equal(t, 1, leaderCount)
+
+	// send a command to the leader
+	cmd := []byte(`{"key": "test-key", "value": "test-value"}"`)
+	t.Logf("Sending command to the leader: %s", string(cmd))
+
+	err = leader.sendCommand(cmd)
+	require.NoError(t, err)
+
+	// wait for replications
+	time.Sleep(3 * time.Second)
+
+	for _, node := range cluster.nodes {
+		logs, _err := node.getLogs()
+		if _err != nil {
+			t.Logf("Error getting logs: %v", _err)
+			continue
+		}
+
+		require.GreaterOrEqual(t, 1, len(logs))
+	}
+
+	t.Logf("Command successfully replicated to all nodes")
 }

@@ -68,6 +68,7 @@ func NewServer(id uint32, peers []uint32, dataDir string, client RaftClient) (*S
 
 func (s *Server) Start() {
 	fmt.Printf("[%d] Started\n", s.ID)
+
 	// start election timer, needed for follower and candidate states,
 	// because leaders don't hold elections, they stop the timer
 	s.resetElectionTimer()
@@ -76,7 +77,6 @@ func (s *Server) Start() {
 	//time.Sleep(10 * time.Millisecond)
 
 	go func() {
-		// main cycle for each server, it waits for events and handle them
 		for {
 			select {
 			case <-s.shutdownCh:
@@ -148,8 +148,7 @@ func (s *Server) replicateLog(peerID uint32) {
 		return
 	}
 
-	// determine what to send to peer,
-	// nextIndex[peer] - where to start from
+	// determine what to send to peer, nextIndex[peer] - where to start from
 	var nextIndex = s.leaderState.nextIndex[peerID]
 
 	// build the "consistency check" params

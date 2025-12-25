@@ -7,7 +7,7 @@ import (
 
 func setupTestServer(t *testing.T, serverID uint32, peers []uint32) *Server {
 	var testDir = t.TempDir()
-	var testClient = NewRaftClient([]string{})
+	var testClient = NewRaftClient(map[uint32]string{})
 
 	server, err := NewServer(serverID, peers, testDir, testClient)
 	require.NoError(t, err)
@@ -17,7 +17,7 @@ func setupTestServer(t *testing.T, serverID uint32, peers []uint32) *Server {
 
 func TestServer_PersisAndRestore(t *testing.T) {
 	testDir := t.TempDir()
-	testClient := NewRaftClient([]string{})
+	testClient := NewRaftClient(map[uint32]string{})
 
 	server1, err := NewServer(1, []uint32{1, 2, 3}, testDir, testClient)
 	require.NoError(t, err)

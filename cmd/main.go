@@ -2,67 +2,54 @@ package main
 
 import (
 	"flag"
-	"fmt"
 	raftserver "github.com/Konstantsiy/casual-raft/raft-server"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 )
 
 func main() {
-	var (
-		id      = flag.Uint("id", 0, "ID of this server")
-		port    = flag.String("port", "8000", "HTTP port")
-		peers   = flag.String("peers", "", "Comma separated list of peers (e.g., localhost:8001,localhost:8002)")
-		dataDir = flag.String("data", "./data", "Data directory for persistent state")
-	)
-
+	configPath := flag.String("config", "./config.yaml", "Path to configuration file")
 	flag.Parse()
 
-	if *id == 0 {
-		log.Fatal("Server ID mus be provided")
+	cfg, err := raftserver.LoadConfig(*configPath)
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	if *peers == "" {
-		log.Fatal("Peers mus be provided")
-	}
-
-	peersAddresses := strings.Split(*peers, ",")
-	peersIDs := make([]uint32, len(peersAddresses))
-	for i := range peersAddresses {
-		peersIDs[i] = uint32(i)
-	}
-
-	if err := os.MkdirAll(*dataDir, 0755); err != nil {
-		log.Fatalf("Failed to create data directory: %v", err)
-	}
+	var (
+		peersAddresses = cfg.GetPeers()
+		peersIDs       = cfg.GetPeerIDs()
+	)
 
 	client := raftserver.NewRaftClient(peersAddresses)
-	server, err := raftserver.NewServer(uint32(*id), peersIDs, *dataDir, client)
+
+	server, err := raftserver.NewServer(cfg.Node.ID, peersIDs, cfg.Node.DataDir, client)
 	if err != nil {
-		log.Fatal("Failed to create server")
+		log.Fatalf("Failed to create server: %s", err.Error())
 	}
 
-	server.Shutdown()
+	server.Start()
 	defer server.Shutdown()
 
 	handler := raftserver.NewHTTPHandler(server)
 	mux := http.NewServeMux()
 	handler.RegisterHandlers(mux)
 
-	// set healthcheck
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		term, isLeader := server.State()
 		log.Printf("Health check: term=%d isLeader=%t", term, isLeader)
 	})
 
-	httpServer := &http.Server{Addr: fmt.Sprintf(":%s", *port), Handler: mux}
+	httpServer := &http.Server{
+		Addr:    cfg.Node.Address,
+		Handler: mux,
+	}
 
 	go func() {
-		log.Printf("Server %d listening on port %s", *id, *port)
+		log.Printf("Server %d listening on port %s", cfg.Node.ID, cfg.Node.Address)
 		log.Fatal(httpServer.ListenAndServe())
 	}()
 

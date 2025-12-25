@@ -1,6 +1,9 @@
 package server
 
-import "errors"
+import (
+	"errors"
+	"log"
+)
 
 func (s *Server) HandleCommand(cmd []byte) error {
 	s.mx.Lock()
@@ -28,6 +31,8 @@ func (s *Server) HandleCommand(cmd []byte) error {
 }
 
 func (s *Server) HandleAppendEntries(req *AppendEntriesRequest) *AppendEntriesResponse {
+	log.Printf("[%d] Received AppendEntries from Leader [%d], term %d\n", s.ID, req.LeaderID, req.Term)
+
 	s.mx.Lock()
 	defer s.mx.Unlock()
 
@@ -133,6 +138,8 @@ func (s *Server) HandleAppendEntries(req *AppendEntriesRequest) *AppendEntriesRe
 		// apply commited entries to state machine
 		s.applyCommitedEntries()
 	}
+
+	log.Printf("[%d] AppendEntries from Leader [%d] succeeded, term %d\n", s.ID, req.LeaderID, req.Term)
 
 	resp.Success = true
 	return resp

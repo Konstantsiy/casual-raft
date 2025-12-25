@@ -31,6 +31,16 @@ type RequestVoteResponse struct {
 	VoteGranted bool   // true means a candidate received a vote
 }
 
+type JoinClusterResponse struct {
+	PeerID        uint32
+	PeerAddresses []string
+}
+
+type PeersDiscoverResponse struct {
+	ServerID uint32
+	Peers    []uint32
+}
+
 type HTTPHandler struct {
 	server *Server
 }
@@ -43,6 +53,7 @@ func (h *HTTPHandler) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/append_entries", h.handleAppendEntries)
 	mux.HandleFunc("/request_vote", h.handleRequestVote)
 	mux.HandleFunc("/command", h.handleCommand)
+	mux.HandleFunc("/discover", h.handleDiscover)
 }
 
 func (h *HTTPHandler) handleCommand(w http.ResponseWriter, r *http.Request) {
@@ -99,6 +110,22 @@ func (h *HTTPHandler) handleRequestVote(w http.ResponseWriter, r *http.Request) 
 	}
 
 	resp := h.server.HandleRequestVote(&req)
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+}
+
+func (h *HTTPHandler) handleDiscover(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	serverID, peers := h.server.Peers()
+	resp := PeersDiscoverResponse{ServerID: serverID, Peers: peers}
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {

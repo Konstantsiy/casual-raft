@@ -1,0 +1,12 @@
+node:
+  id: 2
+  address: localhost:5002
+  data_dir: ./raft-logs
+cluster:
+  peers:
+    - id: 1
+      address: localhost:5001
+    - id: 2
+      address: localhost:5002
+    - id: 3
+      address: localhost:5003

@@ -7,11 +7,16 @@ import (
 	"time"
 )
 
+const (
+	heartbeatInterval = 800 * time.Millisecond
+	RPCTimeout        = 400 * time.Millisecond
+)
+
 func (s *Server) resetElectionTimer() {
 	// Random timeout: 150 ms - 300 ms
 	// If all the servers timeout at the sae time, they all become candidates, causing failed elections.
 	// Random timeout means one server usually becomes a candidate first.
-	var timeout = time.Duration(150+rand.Intn(151)) * time.Millisecond
+	var timeout = time.Duration(800+rand.Intn(8001)) * time.Millisecond
 
 	if s.electionTimer != nil {
 		s.electionTimer.Stop()
@@ -146,6 +151,6 @@ func (s *Server) becomeLeader() {
 
 	// heartbeats are just empty AppendEntries RPC's,
 	// they prevent followers from starting elections
-	s.heartbeatTicker = time.NewTicker(50 * time.Millisecond)
+	s.heartbeatTicker = time.NewTicker(heartbeatInterval)
 	go s.sendHeartbeats()
 }

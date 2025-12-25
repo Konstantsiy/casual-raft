@@ -8,7 +8,7 @@ import (
 type State int
 
 const (
-	// Follower -  normal state, receives commands from leader
+	// Follower - normal state, receives commands from leader
 	// If no heartbeats received, becomes candidate
 	Follower = iota
 

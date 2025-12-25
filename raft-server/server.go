@@ -3,6 +3,7 @@ package server
 import (
 	"fmt"
 	"github.com/Konstantsiy/casual-raft/state-machine"
+	"log"
 	"os"
 	"sync"
 	"time"
@@ -16,7 +17,7 @@ type Server struct {
 
 	persistentState persistentState // state written to disk
 	fd              *os.File        // fd is a file descriptor to store persistence state
-	volatileState   volatileState   //  for each server
+	volatileState   volatileState   // for each server
 	leaderState     leaderState     // only used when state == Leader
 
 	// current state
@@ -32,15 +33,15 @@ type Server struct {
 	shutdownCh chan struct{}
 }
 
-func NewServer(id uint32, peers []uint32, dataDir string, client RaftClient) (*Server, error) {
-	dirPath := fmt.Sprintf("%s/server-%d.dat", dataDir, id)
+func NewServer(serverID uint32, peers []uint32, dataDir string, client RaftClient) (*Server, error) {
+	dirPath := fmt.Sprintf("%s/server-%d.txt", dataDir, serverID)
 	fd, err := os.OpenFile(dirPath, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
 		return nil, err
 	}
 
 	server := &Server{
-		ID:    id,
+		ID:    serverID,
 		peers: peers,
 		fd:    fd,
 		state: Follower,
@@ -60,7 +61,7 @@ func NewServer(id uint32, peers []uint32, dataDir string, client RaftClient) (*S
 	if err = server.restore(); err != nil {
 		server.persistentState.log = make([]logEntry, 0)
 		server.persistentState.currentTerm = 0
-		server.persistentState.votedFor = 0
+		server.persistentState.votedFor = uint32(0)
 	}
 
 	return server, nil
@@ -113,6 +114,18 @@ func (s *Server) State() (uint32, bool) {
 	return s.persistentState.currentTerm, s.state == Leader
 }
 
+func (s *Server) Peers() (uint32, []uint32) {
+	s.mx.RLock()
+	defer s.mx.RUnlock()
+
+	// return all the peers instead of the current server
+	peers := make([]uint32, len(s.peers))
+	copy(peers, s.peers)
+
+	// we need to know the owner as well
+	return s.ID, peers
+}
+
 func (s *Server) sendHeartbeats() {
 	for {
 		select {
@@ -128,11 +141,15 @@ func (s *Server) sendHeartbeats() {
 			}
 			s.mx.RUnlock()
 
+			log.Printf("[%d] === Heartbeats to peers: %v ===", s.ID, s.peers)
+
 			// send AppendEntries to each peer
 			for _, peerID := range s.peers {
 				if peerID == s.ID {
 					continue
 				}
+
+				log.Printf("[%d] >>> Replication to peer %d", s.ID, peerID)
 
 				go s.replicateLog(peerID)
 			}
@@ -195,7 +212,7 @@ func (s *Server) replicateLog(peerID uint32) {
 	}
 
 	s.mx.Lock()
-	s.mx.Unlock()
+	defer s.mx.Unlock()
 
 	// check if peer has higher term
 	if resp.Term != s.persistentState.currentTerm {
@@ -233,6 +250,7 @@ func (s *Server) replicateLog(peerID uint32) {
 	}
 
 	s.updateCommitIndex()
+	log.Printf("[%d] Replication completed\n", s.ID)
 }
 
 func (s *Server) updateCommitIndex() {

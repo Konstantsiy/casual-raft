@@ -3,7 +3,6 @@ package server
 import (
 	"fmt"
 	"github.com/stretchr/testify/require"
-	"math/rand"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -195,12 +194,6 @@ func (c *mockRaftClient) reconnect(serverID uint32) {
 	c.mx.Lock()
 	defer c.mx.Unlock()
 	delete(c.disconnected, serverID)
-}
-
-func TestTest(t *testing.T) {
-	for i := 0; i < 10; i++ {
-		fmt.Println(time.Duration(150+rand.Intn(151)) * time.Millisecond)
-	}
 }
 
 func (c *mockRaftClient) getVoteRequestsTo(serverID uint32) []*RequestVoteRequest {

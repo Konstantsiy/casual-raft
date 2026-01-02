@@ -9,8 +9,10 @@ func (s *Server) HandleCommand(cmd []byte) error {
 	s.mx.Lock()
 	defer s.mx.Unlock()
 
+	log.Printf("[%d] Received command: %s\n", s.ID, string(cmd))
+
 	if s.state != Leader {
-		return errors.New("server is not leader")
+		return errors.New("server is not Leader")
 	}
 
 	lastIndex := uint32(0)
@@ -19,22 +21,20 @@ func (s *Server) HandleCommand(cmd []byte) error {
 	}
 
 	entry := logEntry{
-		Index:   lastIndex,
+		Index:   lastIndex + 1,
 		Term:    s.persistentState.currentTerm,
 		Command: cmd,
 	}
 
 	s.persistentState.log = append(s.persistentState.log, entry)
-	_ = s.persist()
-
-	return nil
+	return s.persist()
 }
 
 func (s *Server) HandleAppendEntries(req *AppendEntriesRequest) *AppendEntriesResponse {
-	log.Printf("[%d] Received AppendEntries from Leader [%d], term %d\n", s.ID, req.LeaderID, req.Term)
-
 	s.mx.Lock()
 	defer s.mx.Unlock()
+
+	log.Printf("[%d] Received AppendEntries from Leader [%d], term %d\n", s.ID, req.LeaderID, req.Term)
 
 	var resp = &AppendEntriesResponse{
 		Term:    s.persistentState.currentTerm,
@@ -54,6 +54,11 @@ func (s *Server) HandleAppendEntries(req *AppendEntriesRequest) *AppendEntriesRe
 		_ = s.persist()
 	}
 
+	if s.state == Candidate {
+		s.state = Follower
+	}
+
+	// don't start new elections when leader is alive
 	s.resetElectionTimer()
 
 	// Check if logs contain entry at prevLogIndex with matching term,
@@ -149,6 +154,8 @@ func (s *Server) HandleRequestVote(req *RequestVoteRequest) *RequestVoteResponse
 	s.mx.Lock()
 	defer s.mx.Unlock()
 
+	log.Printf("[%d] >>> Received RequestVote from Candidate [%d]", s.ID, req.CandidateID)
+
 	var resp = &RequestVoteResponse{
 		Term:        s.persistentState.currentTerm,
 		VoteGranted: false,
@@ -200,9 +207,11 @@ func (s *Server) HandleRequestVote(req *RequestVoteRequest) *RequestVoteResponse
 		}
 
 		s.resetElectionTimer()
+		log.Printf("[%d] === Timer reset after vote granting ===", s.ID)
 
 		resp.VoteGranted = true
 	}
 
+	log.Printf("[%d] Vote Granted for Candidate [%d]", s.ID, req.CandidateID)
 	return resp
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/Konstantsiy/casual-raft/state-machine"
 	"log"
+	"math/rand"
 	"os"
 	"sync"
 	"time"
@@ -23,7 +24,9 @@ type Server struct {
 	// current state
 	state State
 
-	electionTimer   *time.Timer  // timer that triggers election if no heartbeat received
+	electionTimerLastReset time.Time
+	electionTimeout        time.Duration
+
 	heartbeatTicker *time.Ticker // ticker that sends periodic heartbeats
 
 	sm     state_machine.StateMachine
@@ -70,24 +73,34 @@ func NewServer(serverID uint32, peers []uint32, dataDir string, client RaftClien
 func (s *Server) Start() {
 	fmt.Printf("[%d] Started\n", s.ID)
 
-	// start election timer, needed for follower and candidate states,
-	// because leaders don't hold elections, they stop the timer
-	s.resetElectionTimer()
-	fmt.Printf("[%d] Timer reset\n", s.ID)
-
-	//time.Sleep(10 * time.Millisecond)
+	s.mx.Lock()
+	s.electionTimerLastReset = time.Now()
+	s.electionTimeout = time.Duration(800+rand.Intn(201)) * time.Millisecond
+	s.mx.Unlock()
 
 	go func() {
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+
 		for {
 			select {
 			case <-s.shutdownCh:
-				fmt.Printf("[%d] Shutdown signal received\n", s.ID)
 				return
 
-			case <-s.electionTimer.C:
-				// election timer fired - no heartbeat from leader
-				fmt.Printf("[%d] Election timer fired\n", s.ID)
-				s.startElection()
+			case <-ticker.C:
+				s.mx.Lock()
+				if s.state == Leader {
+					s.mx.Unlock()
+					continue
+				}
+
+				if time.Since(s.electionTimerLastReset) >= s.electionTimeout {
+					fmt.Printf("[%d] ⏰ TIMEOUT! No heartbeat for %v. Starting election...\n", s.ID, s.electionTimeout)
+					s.mx.Unlock()
+					s.startElection()
+				} else {
+					s.mx.Unlock()
+				}
 			}
 		}
 	}()
@@ -95,10 +108,6 @@ func (s *Server) Start() {
 
 func (s *Server) Shutdown() {
 	close(s.shutdownCh)
-
-	if s.electionTimer != nil {
-		s.electionTimer.Stop()
-	}
 
 	if s.heartbeatTicker != nil {
 		s.heartbeatTicker.Stop()
@@ -139,30 +148,35 @@ func (s *Server) sendHeartbeats() {
 				s.mx.RUnlock()
 				return
 			}
+
+			peers := s.peers
 			s.mx.RUnlock()
 
 			log.Printf("[%d] === Heartbeats to peers: %v ===", s.ID, s.peers)
 
 			// send AppendEntries to each peer
-			for _, peerID := range s.peers {
+			for _, peerID := range peers {
 				if peerID == s.ID {
 					continue
 				}
 
 				log.Printf("[%d] >>> Replication to peer %d", s.ID, peerID)
-
-				go s.replicateLog(peerID)
+				go func() {
+					if err := s.replicateLog(peerID); err != nil {
+						log.Printf("[ERROR] Failed AppendEntries to peer %d: %v", peerID, err)
+					}
+				}()
 			}
 		}
 	}
 }
 
-func (s *Server) replicateLog(peerID uint32) {
+func (s *Server) replicateLog(peerID uint32) error {
 	s.mx.RLock()
 
 	if s.state != Leader {
 		s.mx.RUnlock()
-		return
+		return nil
 	}
 
 	// determine what to send to peer, nextIndex[peer] - where to start from
@@ -207,8 +221,7 @@ func (s *Server) replicateLog(peerID uint32) {
 
 	var resp, err = s.client.sendAppendEntries(peerID, req)
 	if err != nil {
-		// todo: log
-		return
+		return err
 	}
 
 	s.mx.Lock()
@@ -228,12 +241,12 @@ func (s *Server) replicateLog(peerID uint32) {
 			s.heartbeatTicker.Stop()
 		}
 
-		return
+		return nil
 	}
 
 	// if we're still leader, process the result
 	if s.state != Leader {
-		return
+		return nil
 	}
 
 	// if log inconsistent or replication was fail, decrement next index and retry (on next heartbeat)
@@ -251,6 +264,8 @@ func (s *Server) replicateLog(peerID uint32) {
 
 	s.updateCommitIndex()
 	log.Printf("[%d] Replication completed\n", s.ID)
+
+	return nil
 }
 
 func (s *Server) updateCommitIndex() {

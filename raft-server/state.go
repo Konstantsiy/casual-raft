@@ -20,6 +20,17 @@ const (
 	Leader
 )
 
+func (state State) String() string {
+	switch state {
+	case Follower:
+		return "Follower"
+	case Candidate:
+		return "Candidate"
+	default:
+		return "Leader"
+	}
+}
+
 // persistentState is the state that MUST BE persisted on all servers and survive crashes
 type persistentState struct {
 	// currentTerm is the latest term server has seen

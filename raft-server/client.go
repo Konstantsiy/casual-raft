@@ -29,7 +29,7 @@ func NewRaftClient(peers map[uint32]string) RaftClient {
 }
 
 func (c *raftClient) sendAppendEntries(serverID uint32, req *AppendEntriesRequest) (*AppendEntriesResponse, error) {
-	if int(serverID) >= len(c.peers) { // todo: change to UUID
+	if int(serverID) >= len(c.peers) {
 		return nil, fmt.Errorf("invalid server ID: %d", serverID)
 	}
 
@@ -59,7 +59,7 @@ func (c *raftClient) sendAppendEntries(serverID uint32, req *AppendEntriesReques
 }
 
 func (c *raftClient) sendRequestVote(serverID uint32, req *RequestVoteRequest) (*RequestVoteResponse, error) {
-	if int(serverID) >= len(c.peers) { // todo: change to UUID
+	if int(serverID) >= len(c.peers) {
 		return nil, fmt.Errorf("invalid server ID: %d", serverID)
 	}
 

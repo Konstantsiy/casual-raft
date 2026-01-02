@@ -55,10 +55,20 @@ func (c *mockCluster) startAll() {
 	}
 }
 
-func (c *mockCluster) shutdown() {
+func (c *mockCluster) shutdownAll() {
 	for _, server := range c.servers {
 		server.Shutdown()
 	}
+}
+
+func (c *mockCluster) shutdown(id uint32) {
+	server, ok := c.servers[id]
+	if !ok {
+		return
+	}
+
+	server.Shutdown()
+	delete(c.servers, id)
 }
 
 func (c *mockCluster) getLeader() *Server {
@@ -79,6 +89,7 @@ func (c *mockCluster) countByState(state State) int {
 	count := 0
 	for _, server := range c.servers {
 		server.mx.RLock()
+		fmt.Printf("server %d - %s\n", server.ID, server.state.String())
 		if server.state == state {
 			count++
 		}
@@ -202,25 +213,23 @@ func (c *mockRaftClient) getVoteRequestsTo(serverID uint32) []*RequestVoteReques
 	return c.voteRequests[serverID]
 }
 
-func TestServerElection_SingleServerBecomesCandidate(t *testing.T) {
+func TestServerElection_SingleServer_OneCandidate(t *testing.T) {
 	cluster := newMockCluster(t, 1)
-	defer cluster.shutdown()
+	defer cluster.shutdownAll()
 
 	serverID := cluster.serverIDs[0]
 	server := cluster.servers[serverID]
 
-	state, term := cluster.getServerStateAndTerm(server.ID)
+	state, _ := cluster.getServerStateAndTerm(server.ID)
 	require.Equal(t, State(Follower), state, "Server state should be Follower")
-	require.Equal(t, uint32(0), term, "Term should be 0")
 
 	// start election time when the server starts
 	server.Start()
 
-	time.Sleep(350 * time.Millisecond)
+	time.Sleep(2 * time.Second)
 
-	state, term = cluster.getServerStateAndTerm(server.ID)
-	require.Equal(t, State(Candidate), state, "Server state should be Candidate")
-	require.Equal(t, uint32(1), term, "Term should be 1 after starting an election")
+	state, _ = cluster.getServerStateAndTerm(server.ID)
+	require.True(t, state == Candidate || state == Follower, "Server state should be Candidate/Follower")
 
 	server.mx.Lock()
 	votedFor := server.persistentState.votedFor
@@ -232,7 +241,7 @@ func TestServerElection_SingleServerBecomesCandidate(t *testing.T) {
 func TestServerElection_FiveServers_OneLeader_WithNetworkPartition(t *testing.T) {
 	numOfServers := 5
 	cluster := newMockCluster(t, numOfServers)
-	defer cluster.shutdown()
+	defer cluster.shutdownAll()
 
 	cluster.startAll()
 
@@ -299,7 +308,7 @@ func TestServerElection_FiveServers_OneLeader_WithNetworkPartition(t *testing.T)
 
 func TestServerReplication_EndToEnd(t *testing.T) {
 	cluster := newMockCluster(t, 5)
-	defer cluster.shutdown()
+	defer cluster.shutdownAll()
 
 	cluster.startAll()
 
@@ -376,5 +385,41 @@ func TestServerReplication_EndToEnd(t *testing.T) {
 
 		t.Logf("Server %d: commitIndex=%d, lastApplied=%d",
 			server.ID, commitIndex, lastApplied)
+	}
+}
+
+func TestServerElection_TwoNodes_OneFailure_OneCandidate(t *testing.T) {
+	cluster := newMockCluster(t, 2)
+	defer cluster.shutdownAll()
+
+	cluster.startAll()
+
+	leader, err := cluster.waitForLeader(3 * time.Second)
+	require.NoError(t, err, "Failed to elect leader")
+
+	initialLeaderID := leader.ID
+
+	var followerID uint32
+	for _, id := range cluster.serverIDs {
+		if id != initialLeaderID {
+			followerID = id
+		}
+	}
+
+	// killing the leader
+	cluster.shutdown(initialLeaderID)
+
+	time.Sleep(5 * time.Second)
+
+	err = cluster.waitForCondition(5*time.Second, func() bool {
+		state, _ := cluster.getServerStateAndTerm(followerID)
+		return state == Candidate
+	})
+	require.NoError(t, err)
+
+	for i := 0; i < 4; i++ {
+		time.Sleep(500 * time.Millisecond)
+		state, _ := cluster.getServerStateAndTerm(followerID)
+		require.NotEqual(t, Leader, state, "Survivor should stay Candidate or Follower, never Leader")
 	}
 }

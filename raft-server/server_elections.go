@@ -2,13 +2,14 @@ package server
 
 import (
 	"fmt"
+	"log"
 	"math/rand"
 	"sync"
 	"time"
 )
 
 const (
-	heartbeatInterval = 800 * time.Millisecond
+	heartbeatInterval = 500 * time.Millisecond
 	RPCTimeout        = 400 * time.Millisecond
 )
 
@@ -16,30 +17,32 @@ func (s *Server) resetElectionTimer() {
 	// Random timeout: 150 ms - 300 ms
 	// If all the servers timeout at the sae time, they all become candidates, causing failed elections.
 	// Random timeout means one server usually becomes a candidate first.
-	var timeout = time.Duration(800+rand.Intn(8001)) * time.Millisecond
+	//var timeout = time.Duration(800+rand.Intn(201)) * time.Millisecond
+	//
+	//if s.electionTimer != nil {
+	//	s.electionTimer.Stop()
+	//}
+	//
+	//s.electionTimer = time.NewTimer(timeout)
 
-	if s.electionTimer != nil {
-		s.electionTimer.Stop()
-	}
+	s.electionTimerLastReset = time.Now()
+	s.electionTimeout = time.Duration(800+rand.Intn(201)) * time.Millisecond
+}
 
-	s.electionTimer = time.NewTimer(timeout)
+func (s *Server) withLock(f func()) {
+	s.mx.Lock()
+	f()
+	s.mx.Unlock()
 }
 
 func (s *Server) startElection() {
-	s.mx.Lock()
-
-	// become a candidate
-	s.state = Candidate
-
 	fmt.Printf("[%d] Become Candidate\n", s.ID)
 
-	// increment term (new election round)
-	s.persistentState.currentTerm++
+	s.mx.Lock()
+	s.state = Candidate
+	s.persistentState.currentTerm++ // new elections round
 	var currentTerm = s.persistentState.currentTerm
-
-	// voted for yourself
-	s.persistentState.votedFor = s.ID
-
+	s.persistentState.votedFor = s.ID // voted for yourself
 	_ = s.persist()
 
 	var lastLogIndex = uint32(0)
@@ -50,15 +53,15 @@ func (s *Server) startElection() {
 		lastLogIndex = lastEntry.Index
 		lastLogTerm = lastEntry.Term
 	}
-
 	s.mx.Unlock()
 
 	// reset time for the next election if this fails
-	s.resetElectionTimer()
+	s.withLock(s.resetElectionTimer)
 
 	// collect votes from all peers, start with 1 vote (yourself)
 	var votes = 1
 	var voteMx sync.Mutex
+	var wonOnce sync.Once
 
 	for _, peerID := range s.peers {
 		if peerID == s.ID {
@@ -77,57 +80,53 @@ func (s *Server) startElection() {
 			// might fail in peer is down/slow
 			var resp, err = s.client.sendRequestVote(peer, req)
 			if err != nil {
-				// just ignore unreachable peer
-				// todo: add logging
+				fmt.Printf("[%d] --- ERROR sending vote to peer [%d]: %v", s.ID, peer, err)
 				return
 			}
 
 			// check if peer has higher term
 			s.mx.Lock()
+			defer s.mx.Unlock()
+
 			if resp.Term > s.persistentState.currentTerm {
 				// we're behind, need to step down
-				s.persistentState.currentTerm = resp.Term
 				s.state = Follower
 				s.persistentState.votedFor = 0
-
 				_ = s.persist()
 
 				s.resetElectionTimer()
-				s.mx.Unlock()
-
 				// we don't need to check the other peers anymore
 				return
 			}
-			s.mx.Unlock()
 
 			// count the vote if granted
 			if resp.VoteGranted {
 				voteMx.Lock()
 				votes++
 
-				// check if we ween taken the majority of votes
+				// check if we ween taken the majority of votes,
+				// we need to become a leader as soon as possible (Protocol Correctness)
 				var majority = len(s.peers)/2 + 1
+
 				if votes >= majority {
-					s.becomeLeader()
+					wonOnce.Do(func() { s.becomeLeader() })
 				}
+
 				voteMx.Unlock()
 			}
-
 		}(peerID)
 	}
+
+	fmt.Printf("[%d] Vote ended, become Follower\n", s.ID)
 }
 
 func (s *Server) becomeLeader() {
-	s.mx.Lock()
-	defer s.mx.Unlock()
-
 	// only become leader if still a candidate
 	if s.state != Candidate {
 		return
 	}
 
 	s.state = Leader
-
 	fmt.Printf("[%d] Become Leader\n", s.ID)
 
 	// init leader state
@@ -144,13 +143,10 @@ func (s *Server) becomeLeader() {
 		}
 	}
 
-	// stop election timer, because leaders don't hold elections
-	if s.electionTimer != nil {
-		s.electionTimer.Stop()
-	}
-
 	// heartbeats are just empty AppendEntries RPC's,
 	// they prevent followers from starting elections
-	s.heartbeatTicker = time.NewTicker(heartbeatInterval)
+	s.heartbeatTicker = time.NewTicker(300 * time.Millisecond)
+	log.Printf("[%d] Started sending heartbeats...\n", s.ID)
+
 	go s.sendHeartbeats()
 }

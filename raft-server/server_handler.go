@@ -118,7 +118,9 @@ func (s *Server) HandleAppendEntries(req *AppendEntriesRequest) *AppendEntriesRe
 
 	if len(req.Entries) > 0 {
 		// we have new entries, persist the state
-		_ = s.persist()
+		if err := s.persist(); err != nil {
+			return resp
+		}
 	}
 
 	// update commit index

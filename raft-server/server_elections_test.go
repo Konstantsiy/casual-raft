@@ -49,7 +49,7 @@ func newMockCluster(t *testing.T, n int) *mockCluster {
 	}
 }
 
-func (c *mockCluster) startAll() {
+func (c *mockCluster) start() {
 	for _, server := range c.servers {
 		go server.Start()
 	}
@@ -243,7 +243,7 @@ func TestServerElection_FiveServers_OneLeader_WithNetworkPartition(t *testing.T)
 	cluster := newMockCluster(t, numOfServers)
 	defer cluster.shutdownAll()
 
-	cluster.startAll()
+	cluster.start()
 
 	t.Logf("Wait for leader election...")
 	leader, err := cluster.waitForLeader(3 * time.Second)
@@ -310,7 +310,7 @@ func TestServerReplication_EndToEnd(t *testing.T) {
 	cluster := newMockCluster(t, 5)
 	defer cluster.shutdownAll()
 
-	cluster.startAll()
+	cluster.start()
 
 	t.Log("Waiting for leader election...")
 	leader, err := cluster.waitForLeader(3 * time.Second)
@@ -392,7 +392,7 @@ func TestServerElection_TwoNodes_OneFailure_OneCandidate(t *testing.T) {
 	cluster := newMockCluster(t, 2)
 	defer cluster.shutdownAll()
 
-	cluster.startAll()
+	cluster.start()
 
 	leader, err := cluster.waitForLeader(3 * time.Second)
 	require.NoError(t, err, "Failed to elect leader")
@@ -421,5 +421,106 @@ func TestServerElection_TwoNodes_OneFailure_OneCandidate(t *testing.T) {
 		time.Sleep(500 * time.Millisecond)
 		state, _ := cluster.getServerStateAndTerm(followerID)
 		require.NotEqual(t, Leader, state, "Survivor should stay Candidate or Follower, never Leader")
+	}
+}
+
+func TestServer_ReplicateLog_Consistency(t *testing.T) {
+	cluster := newMockCluster(t, 2)
+	defer cluster.shutdownAll()
+
+	cluster.start()
+	leader, err := cluster.waitForLeader(5 * time.Second)
+	require.NoError(t, err)
+
+	var followerID uint32
+	for _, id := range cluster.serverIDs {
+		if id != leader.ID {
+			followerID = id
+			break
+		}
+	}
+	follower := cluster.servers[followerID]
+
+	leader.mx.Lock()
+	entries := []logEntry{
+		{Index: 1, Term: leader.persistentState.currentTerm, Command: []byte("cmd1")},
+		{Index: 2, Term: leader.persistentState.currentTerm, Command: []byte("cmd2")},
+		{Index: 3, Term: leader.persistentState.currentTerm, Command: []byte("cmd3")},
+	}
+	leader.persistentState.log = append(leader.persistentState.log, entries...)
+
+	// set nextIndex to 1, indicating the follower has nothing
+	leader.leaderState.nextIndex[followerID] = 1
+	leader.leaderState.matchIndex[followerID] = 0
+	leader.mx.Unlock()
+
+	// manual replication
+	t.Logf("Triggering replicateLog for Follower %d", followerID)
+	err = leader.replicateLog(followerID)
+	require.NoError(t, err)
+
+	// verify follower's Log
+	follower.mx.RLock()
+	require.Equal(t, 3, len(follower.persistentState.log), "Follower should have 3 entries")
+	require.Equal(t, uint32(3), follower.persistentState.log[2].Index)
+	require.Equal(t, []byte("cmd2"), follower.persistentState.log[1].Command)
+	follower.mx.RUnlock()
+
+	// verify leader's tracking State
+	leader.mx.RLock()
+	require.Equal(t, uint32(4), leader.leaderState.nextIndex[followerID],
+		"Leader should increment nextIndex to 4")
+	require.Equal(t, uint32(3), leader.leaderState.matchIndex[followerID],
+		"Leader should update matchIndex to 3")
+	leader.mx.RUnlock()
+}
+
+func TestServer_CommandReplication_HappyPath(t *testing.T) {
+	cluster := newMockCluster(t, 3)
+	defer cluster.shutdownAll()
+
+	cluster.start()
+
+	leader, err := cluster.waitForLeader(5 * time.Second)
+	require.NoError(t, err, "Cluster failed to elect a leader")
+
+	commands := [][]byte{
+		[]byte("SET x 10"),
+		[]byte("SET y 20"),
+		[]byte("GET x"),
+	}
+
+	for i, cmd := range commands {
+		err = leader.HandleCommand(cmd)
+		require.NoError(t, err, "Leader failed to handle command %d", i)
+	}
+
+	err = cluster.waitForCondition(5*time.Second, func() bool {
+		leader.mx.RLock()
+		defer leader.mx.RUnlock()
+
+		// expect commitIndex to reach the number of commands sent
+		return leader.volatileState.commitedIndex >= uint32(len(commands))
+	})
+	require.NoError(t, err, "Leader failed to commit commands in time")
+
+	// verify log consistency across all nodes
+	for _, serverID := range cluster.serverIDs {
+		server := cluster.servers[serverID]
+		server.mx.RLock()
+
+		require.Equal(t, len(commands), len(server.persistentState.log),
+			"Server %d log length mismatch", serverID)
+
+		for i, cmd := range commands {
+			entry := server.persistentState.log[i]
+			require.Equal(t, uint32(i+1), entry.Index, "Index mismatch at log position %d", i)
+			require.Equal(t, cmd, entry.Command, "Command content mismatch at log position %d", i)
+		}
+
+		require.Equal(t, uint32(len(commands)), server.volatileState.commitedIndex,
+			"Server %d commitIndex mismatch", serverID)
+
+		server.mx.RUnlock()
 	}
 }
